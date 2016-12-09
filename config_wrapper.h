@@ -96,3 +96,14 @@
 #if defined __ARMEL__ && defined BANG_BANG
   #undef BANG_BANG
 #endif
+
+/**
+  Check endstops for delta kinematics
+  
+  Delta needs only max endstops
+*/
+#if defined KINEMATICS_DELTA
+  #if !(defined X_MAX_PIN && defined Y_MAX_PIN && defined Z_MAX_PIN)
+    #error KINEMATICS_DELTA needs 3 max endstops
+  #endif
+#endif
