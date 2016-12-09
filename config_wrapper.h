@@ -107,3 +107,15 @@
     #error KINEMATICS_DELTA needs 3 max endstops
   #endif
 #endif
+
+/**
+  Buffer must be at least 16 for delta kinematics
+*/
+#if defined KINEMATICS_DELTA
+  #if (MOVEBUFFER_SIZE < 16)
+    #warning MOVEBUFFER_SIZE has to be at least 16 (and 255 maximum). \
+             Set to 16.
+    #undef MOVEBUFFER_SIZE
+    #define MOVEBUFFER_SIZE 16
+  #endif
+#endif

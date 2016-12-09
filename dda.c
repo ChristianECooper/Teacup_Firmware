@@ -28,6 +28,26 @@
 #endif
 
 
+#ifdef KINEMATICS_DELTA
+//Must scale by 16 because 2^32 = 4,294,967,296 - giving a maximum squareroot of 65536
+//If scaled by 8, maximum movement is 65,536 * 8 = 524,288um, 65,536 * 16 = 1,048,576um
+const uint32_t delta_radius         = (DEFAULT_DELTA_RADIUS >> 4);
+const uint32_t delta_diagonal_rod   = (DEFAULT_DELTA_DIAGONAL_ROD >> 4);
+const uint32_t delta_diagonal_rod_sqr = (DEFAULT_DELTA_DIAGONAL_ROD >> 4) * (DEFAULT_DELTA_DIAGONAL_ROD >> 4);
+const int32_t  delta_tower1_x       = (-0.86602540378443864676372317075294 * (DEFAULT_DELTA_RADIUS >> 4));
+const int32_t  delta_tower1_y       = (-0.5 * (DEFAULT_DELTA_RADIUS >> 4));
+const int32_t  delta_tower2_x       = ( 0.86602540378443864676372317075294 * (DEFAULT_DELTA_RADIUS >> 4));
+const int32_t  delta_tower2_y       = (-0.5 * (DEFAULT_DELTA_RADIUS >> 4));
+const int32_t  delta_tower3_x       = 0;
+const int32_t  delta_tower3_y       = (DEFAULT_DELTA_RADIUS >> 4);
+int32_t delta_height = Z_MAX * 1000;
+int32_t endstop_adj_x;
+int32_t endstop_adj_y;
+int32_t endstop_adj_z;
+uint8_t bypass_delta;
+#endif
+
+
 /*
 	position tracking
 */
@@ -98,6 +118,10 @@ static int8_t get_direction(DDA *dda, enum axis_e n) {
 /*! Inititalise DDA movement structures
 */
 void dda_init(void) {
+#ifdef KINEMATICS_DELTA
+   bypass_delta=0;
+   dda_new_startpoint();
+#endif
 	// set up default feedrate
 	if (startpoint.F == 0)
 		startpoint.F = next_target.target.F = SEARCH_FEEDRATE_Z;
@@ -112,8 +136,29 @@ void dda_init(void) {
 	This is needed for example after homing or a G92. The new location must be in startpoint already.
 */
 void dda_new_startpoint(void) {
+  #ifdef KINEMATICS_DELTA
+    enum axis_e i;
+    if (bypass_delta == 0)
+    {
+      TARGET startpoint_delta;
+      startpoint_delta = delta_from_cartesian(&startpoint);
+      axes_um_to_steps(startpoint_delta.axis, startpoint_steps.axis);
+      startpoint_steps.axis[E] = um_to_steps(startpoint_delta.axis[E], E);
+
+      if (DEBUG_DELTA && (debug_flags & DEBUG_DELTA)){
+          sersendf_P(PSTR("Trans_Delta: cart(%ld,%ld,%ld) delta(%ld,%ld,%ld) \n"),
+                    startpoint.axis[X], startpoint.axis[Y], startpoint.axis[Z],
+                    startpoint_delta.axis[X],startpoint_delta.axis[Y],startpoint_delta.axis[Z]);
+      }
+    } else
+    {
+      axes_um_to_steps(startpoint.axis, startpoint_steps.axis);
+      startpoint_steps.axis[E] = um_to_steps(startpoint.axis[E], E);
+    }
+  #else
 	axes_um_to_steps(startpoint.axis, startpoint_steps.axis);
   startpoint_steps.axis[E] = um_to_steps(startpoint.axis[E], E);
+  #endif
 }
 
 /**
@@ -190,6 +235,13 @@ void dda_create(DDA *dda, const TARGET *target) {
 
   // Handle bot axes. They're subject to kinematics considerations.
   code_axes_to_stepper_axes(&startpoint, target, delta_um, steps);
+
+  if (DEBUG_DELTA && (debug_flags & DEBUG_DELTA)){
+     sersendf_P(PSTR("DDA_c After: start_steps(%ld,%ld,%ld) steps(%ld,%ld,%ld) \n"),
+                startpoint_steps.axis[X],startpoint_steps.axis[Y],startpoint_steps.axis[Z],
+                steps[X],steps[Y],steps[Z]);
+  }
+
   for (i = X; i < E; i++) {
     int32_t delta_steps;
 
@@ -287,7 +339,7 @@ void dda_create(DDA *dda, const TARGET *target) {
 		stepper_enable();
 		x_enable();
 		y_enable();
-    #ifndef Z_AUTODISABLE
+    #if !(defined Z_AUTODISABLE) || (defined KINEMATICS_DELTA)
       z_enable();
     // #else Z is enabled in dda_start().
     #endif
@@ -497,7 +549,7 @@ void dda_start(DDA *dda) {
 
   // Get ready to go.
   psu_timeout = 0;
-  #ifdef Z_AUTODISABLE
+    #if defined Z_AUTODISABLE || !(defined KINEMATICS_DELTA)
     if (dda->delta[Z])
       z_enable();
   #endif
@@ -713,8 +765,9 @@ void dda_step(DDA *dda) {
 		#ifdef	DC_EXTRUDER
 			heater_set(DC_EXTRUDER, 0);
 		#endif
-    #ifdef Z_AUTODISABLE
-      // Z stepper is only enabled while moving.
+
+    // z stepper is only enabled while moving - except for KINEMATICS_DELTA
+    #if (defined Z_AUTODISABLE) || !(defined KINEMATICS_DELTA)
       z_disable();
     #endif
 
@@ -776,6 +829,14 @@ void dda_clock() {
   //          means, we trust dda isn't changed behind our back, which could
   //          in principle (but rarely) happen if endstops are checked not as
   //          endstop search, but as part of normal operations.
+  
+  // for delta kinematics we need to check the endstops together
+  #if defined KINEMATICS_DELTA
+    #define SET_ENDSTOP_TIGGER(trigger, check) (trigger) |= (check)
+  #else
+    #define SET_ENDSTOP_TIGGER(trigger, check) (trigger) = (check)
+  #endif
+
   if (dda->endstop_check && ! move_state.endstop_stop) {
     #ifdef X_MIN_PIN
     if (dda->endstop_check & 0x01) {
@@ -783,7 +844,7 @@ void dda_clock() {
         move_state.debounce_count_x++;
       else
         move_state.debounce_count_x = 0;
-      endstop_trigger = move_state.debounce_count_x >= ENDSTOP_STEPS;
+      SET_ENDSTOP_TIGGER(endstop_trigger, move_state.debounce_count_x >= ENDSTOP_STEPS);
     }
     #endif
     #ifdef X_MAX_PIN
@@ -792,7 +853,7 @@ void dda_clock() {
         move_state.debounce_count_x++;
       else
         move_state.debounce_count_x = 0;
-      endstop_trigger = move_state.debounce_count_x >= ENDSTOP_STEPS;
+      SET_ENDSTOP_TIGGER(endstop_trigger, move_state.debounce_count_x >= ENDSTOP_STEPS);
     }
     #endif
 
@@ -802,7 +863,7 @@ void dda_clock() {
         move_state.debounce_count_y++;
       else
         move_state.debounce_count_y = 0;
-      endstop_trigger = move_state.debounce_count_y >= ENDSTOP_STEPS;
+      SET_ENDSTOP_TIGGER(endstop_trigger, move_state.debounce_count_y >= ENDSTOP_STEPS);
     }
     #endif
     #ifdef Y_MAX_PIN
@@ -811,7 +872,7 @@ void dda_clock() {
         move_state.debounce_count_y++;
       else
         move_state.debounce_count_y = 0;
-      endstop_trigger = move_state.debounce_count_y >= ENDSTOP_STEPS;
+      SET_ENDSTOP_TIGGER(endstop_trigger, move_state.debounce_count_y >= ENDSTOP_STEPS);
     }
     #endif
 
@@ -821,7 +882,7 @@ void dda_clock() {
         move_state.debounce_count_z++;
       else
         move_state.debounce_count_z = 0;
-      endstop_trigger = move_state.debounce_count_z >= ENDSTOP_STEPS;
+      SET_ENDSTOP_TIGGER(endstop_trigger, move_state.debounce_count_z >= ENDSTOP_STEPS);
     }
     #endif
     #ifdef Z_MAX_PIN
@@ -830,7 +891,7 @@ void dda_clock() {
         move_state.debounce_count_z++;
       else
         move_state.debounce_count_z = 0;
-      endstop_trigger = move_state.debounce_count_z >= ENDSTOP_STEPS;
+      SET_ENDSTOP_TIGGER(endstop_trigger, move_state.debounce_count_z >= ENDSTOP_STEPS);
     }
     #endif
 
